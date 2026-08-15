@@ -73,6 +73,58 @@ function wrapCursorAgentError(err: unknown): never {
   throw err;
 }
 
+const STREAM_GONE = /stream is no longer available/i;
+const TRANSIENT_PROMPT_ATTEMPTS = 3;
+const TRANSIENT_PROMPT_DELAY_MS = 2000;
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Dropped run streams and SDK-marked retryable failures are safe to retry. */
+export function isTransientCloudAgentFailure(err: unknown): boolean {
+  if (err instanceof CursorAgentError && err.isRetryable) return true;
+  return STREAM_GONE.test(errorMessage(err));
+}
+
+async function defaultSleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function withTransientRetries<T>(
+  fn: () => Promise<T>,
+  options: {
+    label?: string;
+    attempts?: number;
+    delayMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<T> {
+  const attempts = options.attempts ?? TRANSIENT_PROMPT_ATTEMPTS;
+  const delayMs = options.delayMs ?? TRANSIENT_PROMPT_DELAY_MS;
+  const sleep = options.sleep ?? defaultSleep;
+  const label = options.label ?? "cloud-prompt";
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (!isTransientCloudAgentFailure(err) || attempt === attempts) {
+        throw err;
+      }
+      console.warn(`[cursor] ${label} transient failure, retrying`, {
+        attempt,
+        attempts,
+        message: errorMessage(err),
+      });
+      await sleep(delayMs * attempt);
+    }
+  }
+  throw lastError;
+}
+
 /** Prefer a grok-named model when available; otherwise fall back. */
 export async function resolveModelId(apiKey: string): Promise<string> {
   try {
@@ -126,43 +178,48 @@ export async function promptCloudAgent(
   const modelId = params.modelId ?? (await resolveModelId(apiKey));
 
   try {
-    const result = await Agent.prompt(prompt, {
-      apiKey,
-      model: { id: modelId },
-      cloud: {
-        repos: repos.map((r) => ({
-          url: r.url,
-          startingRef: r.startingRef ?? "main",
-        })),
-        autoCreatePR,
-        skipReviewerRequest,
-        ...(envVars && Object.keys(envVars).length > 0 ? { envVars } : {}),
-        ...(metadata ? { metadata } : {}),
+    return await withTransientRetries(
+      async () => {
+        const result = await Agent.prompt(prompt, {
+          apiKey,
+          model: { id: modelId },
+          cloud: {
+            repos: repos.map((r) => ({
+              url: r.url,
+              startingRef: r.startingRef ?? "main",
+            })),
+            autoCreatePR,
+            skipReviewerRequest,
+            ...(envVars && Object.keys(envVars).length > 0 ? { envVars } : {}),
+            ...(metadata ? { metadata } : {}),
+          },
+        });
+
+        console.info(`[cursor] ${logLabel} finished`, {
+          runId: result.id,
+          status: result.status,
+          modelId,
+          durationMs: result.durationMs,
+        });
+
+        if (result.status !== "finished") {
+          const detail = result.error?.message ?? result.status;
+          throw new Error(`${logLabel} agent did not finish: ${detail}`);
+        }
+
+        const text = result.result?.trim() ?? "";
+        if (requireResultText && !text) {
+          throw new Error(`${logLabel} agent returned no result text`);
+        }
+
+        return {
+          text,
+          runId: result.id,
+          durationMs: result.durationMs,
+        };
       },
-    });
-
-    console.info(`[cursor] ${logLabel} finished`, {
-      runId: result.id,
-      status: result.status,
-      modelId,
-      durationMs: result.durationMs,
-    });
-
-    if (result.status !== "finished") {
-      const detail = result.error?.message ?? result.status;
-      throw new Error(`${logLabel} agent did not finish: ${detail}`);
-    }
-
-    const text = result.result?.trim() ?? "";
-    if (requireResultText && !text) {
-      throw new Error(`${logLabel} agent returned no result text`);
-    }
-
-    return {
-      text,
-      runId: result.id,
-      durationMs: result.durationMs,
-    };
+      { label: logLabel },
+    );
   } catch (err) {
     wrapCursorAgentError(err);
   }
