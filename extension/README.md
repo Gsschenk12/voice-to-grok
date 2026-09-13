@@ -1,6 +1,6 @@
 # Voice to Code — Meet Captions (Chrome extension)
 
-Free capture layer: reads Google Meet live captions from the DOM and streams them into the Voice to Code app. No ASR, no Wispr key, no server.
+Free capture layer: reads Google Meet live captions from the DOM and streams them into the Voice to Code app. No ASR service, no audio key, no server.
 
 ## Load unpacked
 
@@ -13,7 +13,7 @@ Free capture layer: reads Google Meet live captions from the DOM and streams the
 ## Demo flow
 
 1. Run the Next.js app (`npm run dev` → http://localhost:3000)
-2. Sign in, open **Meeting setup**, choose **Google Meet captions (free)**
+2. Sign in and open **Meeting setup**
 3. Start a meeting in the app
 4. Open (or join) a Google Meet tab in the **same Chrome profile**
 5. Turn on captions (**CC**) in Meet

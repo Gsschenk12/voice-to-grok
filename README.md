@@ -1,122 +1,226 @@
-# Voice to Code
+<div align="center">
 
-Live meeting transcription that launches Cursor cloud agents when you say:
+# 🎙️ Voice to Code
 
-- **“grok make an issue”** — create a GitHub issue from the spoken context
-- **“grok make a PR”** / **“grok make a pull request”** — implement the request and open a PR
+**Say it in the meeting. Ship it from the meeting.**
 
-Transcript sources (pick one on meeting setup):
+Live meeting transcription that turns spoken wake phrases into GitHub issues and pull requests, implemented by [Cursor](https://cursor.com) cloud agents.
 
-- **Google Meet captions (free)** — Chrome extension reads Meet’s live captions from the DOM (no ASR key)
-- **Wispr Flow (mic)** — browser mic streamed to Wispr (optional `WISPR_API_KEY`)
+[![Next.js](https://img.shields.io/badge/Next.js-16.3-black?logo=next.js&logoColor=white)](https://nextjs.org)
+[![React](https://img.shields.io/badge/React-19.2-61DAFB?logo=react&logoColor=black)](https://react.dev)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Tests](https://img.shields.io/badge/tests-148%20passing-brightgreen?logo=vitest&logoColor=white)](#testing)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522.13-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+
+</div>
+
+---
+
+## What it does
+
+You are on a call. Someone describes a bug. Instead of writing it down and forgetting it, you say the wake phrase out loud — and by the end of the meeting the issue exists, or the pull request is already open.
+
+| Say this | And this happens |
+| --- | --- |
+| 🗣️ **"grok make an issue"** | A GitHub issue is drafted from the spoken context and created in your repo |
+| 🗣️ **"grok make a PR"**<br/>🗣️ **"grok make a pull request"** | The request is planned against the related issue, then implemented by a cloud agent that opens a PR |
+
+Wake-phrase matching is fuzzy on purpose: speech-to-text rarely hears *"grok"* cleanly, so `grock`, `groq`, `croak`, `brock` and a dozen other near-misses all resolve to the same token via alias table plus edit-distance matching.
+
+> [!NOTE]
+> Transcription comes from **Google Meet's live captions**, read from the DOM by a small Chrome extension. There is no ASR service and no audio key to manage.
+
+---
 
 ## How it works
 
-1. Sign in with GitHub (OAuth scopes: `read:user`, `repo`).
-2. On meeting setup, paste your **Cursor API key**, pick a repo, and choose a transcript source.
-3. Start the meeting and click **Start listening**.
-4. Keyword detection posts to the server, which launches a **cloud** agent via `@cursor/sdk`.
+```
+   Google Meet tab                Chrome extension              Next.js app
+  ┌────────────────┐            ┌──────────────────┐        ┌────────────────┐
+  │ live captions  │──DOM read─▶│  content script  │──msg──▶│ transcript UI  │
+  │   (CC on)      │            │   + background   │        │ keyword detect │
+  └────────────────┘            └──────────────────┘        └───────┬────────┘
+                                                                    │
+                                                       POST /api/commands
+                                                                    │
+                                                                    ▼
+                                                          ┌───────────────────┐
+                                                          │  command pipeline │
+                                                          └───────────────────┘
+```
+
+A wake phrase in the rolling transcript window POSTs to `/api/commands`, which runs a six-stage pipeline. Each stage may **continue**, **skip**, or **halt**, and every decision is appended to a log that the UI can render:
+
+| # | Stage | Responsibility |
+| :-: | --- | --- |
+| 1 | `resolveIntent` | Turn the matched wake phrase into an issue/PR intent |
+| 2 | `matchIssues` | Search the repo for issues the transcript may already be about |
+| 3 | `addIssueContext` | Ask Grok whether the transcript adds new facts; comment them on the match |
+| 4 | `resolveIssue` | Decide: reuse the matched issue, or create a new one |
+| 5 | `decidePrNeeded` | Was this a PR trigger, or issue-only? |
+| 6 | `execute` | Launch the Cursor cloud agent (plan → implement → `autoCreatePR`) |
+
+The runner in `src/lib/pipeline/run.ts` knows nothing about GitHub or Cursor — it only understands the stage interface, which keeps every stage independently testable.
+
+---
 
 ## Prerequisites
 
-- Node.js **≥ 22.13** (`@cursor/sdk` requirement)
-- A GitHub account (for OAuth sign-in)
-- A Cursor account (API key + GitHub App on your test repos)
-- For **Meet captions**: Chrome + the unpacked extension in [`extension/`](extension/)
-- Optional: a [Wispr Flow](https://wisprflow.ai/developers) org API key (`fl-...`) for mic streaming
+| Requirement | Notes |
+| --- | --- |
+| **Node.js ≥ 22.13** | Required by `@cursor/sdk` |
+| **GitHub account** | OAuth sign-in; scopes `read:user`, `user:email`, `repo` |
+| **Cursor account** | API key **+** the Cursor GitHub App installed on the repos you'll discuss |
+| **Google Chrome** | For the unpacked caption extension in [`extension/`](extension/) |
 
-## Local development setup
+---
 
-Env vars live in a gitignored **`.env`** file at the repo root (Next.js loads it automatically). Do not commit secrets. The Cursor API key is **not** stored in `.env` — you paste it in the meeting setup UI.
-
-### 1. Install dependencies
+## Quick start
 
 ```bash
+git clone git@github.com:Gsschenk12/voice-to-code-hackathon.git
+cd voice-to-code-hackathon
 npm install
-```
-
-### 2. Create `.env` (if you do not already have one)
-
-```bash
 cp .env.example .env
-openssl rand -base64 32
-```
-
-Paste the generated value into `AUTH_SECRET` in `.env`. Your file should include:
-
-```
-AUTH_SECRET=<generated>
-AUTH_URL=http://localhost:3000
-GITHUB_CLIENT_ID=
-GITHUB_CLIENT_SECRET=
-WISPR_API_KEY=
-```
-
-### 3. GitHub OAuth App
-
-1. Open [GitHub → Developer settings → OAuth Apps](https://github.com/settings/developers) and create a new OAuth App.
-2. Set:
-   - **Homepage URL:** `http://localhost:3000`
-   - **Authorization callback URL:** `http://localhost:3000/api/auth/callback/github`
-3. Copy the **Client ID** and **Client secret** into `.env` as `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`.
-4. The app requests scopes `read:user`, `user:email`, and `repo` (configured in `src/lib/auth.ts`). The `repo` scope lets cloud agents create issues via your OAuth token.
-
-### 4. Cursor (UI key, not in `.env`)
-
-1. Create an API key at [Cursor Dashboard → Integrations](https://cursor.com/dashboard/integrations).
-2. Install the [Cursor GitHub App](https://cursor.com/docs/integrations/github) on the repository you will discuss. Cloud agents can only clone repos already authorized for that app.
-3. After signing in, open **Meeting setup** (`/meeting`), paste the Cursor API key, click **Save key**, then **Load from Cursor** to pick a repo.
-
-### 5. Google Meet captions (free path)
-
-1. Load the unpacked extension — see [`extension/README.md`](extension/README.md):
-   - `chrome://extensions` → Developer mode → **Load unpacked** → select `extension/`
-2. On meeting setup, choose **Google Meet captions (free)** → **Start meeting**
-3. Open a Meet tab in the same Chrome profile and turn on captions (**CC**)
-4. Click **Start listening** in the app — speaker-attributed captions appear in the transcript pane
-
-No `WISPR_API_KEY` required for this path.
-
-### 6. Wispr Flow (optional mic path)
-
-1. Get an org API key from [Wispr Flow developers](https://wisprflow.ai/developers) (`fl-...`).
-2. Set `WISPR_API_KEY` in `.env`.
-3. On meeting setup, choose **Wispr Flow (mic)**.
-4. This is required only for live mic streaming (`POST /api/wispr/token`). To test GitHub + Cursor agent launch without audio, a placeholder value is enough.
-
-### 7. Run the app
-
-```bash
+openssl rand -base64 32   # paste into AUTH_SECRET
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000), then:
+Then open **http://localhost:3000** and follow the setup below.
+
+---
+
+## Setup
+
+### 1. Environment
+
+Secrets live in a gitignored **`.env`** at the repo root (Next.js loads it automatically).
+
+```ini
+AUTH_SECRET=<openssl rand -base64 32>
+AUTH_URL=http://localhost:3000
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+```
+
+> [!IMPORTANT]
+> Your **Cursor API key is not an env var**. You paste it into the meeting setup UI, and it is stored on the Auth.js session — server-side only, never sent back to the browser.
+
+### 2. GitHub OAuth App
+
+Create one at [GitHub → Developer settings → OAuth Apps](https://github.com/settings/developers):
+
+| Field | Value |
+| --- | --- |
+| Homepage URL | `http://localhost:3000` |
+| Authorization callback URL | `http://localhost:3000/api/auth/callback/github` |
+
+Copy the **Client ID** and **Client secret** into `.env`. The `repo` scope is what lets cloud agents create issues on your behalf.
+
+### 3. Cursor
+
+1. Create an API key at [Cursor Dashboard → Integrations](https://cursor.com/dashboard/integrations).
+2. Install the [Cursor GitHub App](https://cursor.com/docs/integrations/github) on every repo you plan to discuss — cloud agents can only clone repos already authorized for that app.
+3. In the app: **Meeting setup** (`/meeting`) → paste key → **Save key** → **Load from Cursor** → pick a repo.
+
+### 4. Meet captions extension
+
+```
+chrome://extensions  →  Developer mode  →  Load unpacked  →  select extension/
+```
+
+Full details, including the popup status badges, are in [`extension/README.md`](extension/README.md).
+
+### 5. Run a meeting
 
 1. **Sign in with GitHub**
-2. **Set up meeting** → save Cursor API key → load repos → pick repo → choose transcript source → **Start meeting**
-3. Click **Start listening** (Meet captions extension, or Wispr with a real `WISPR_API_KEY`) or exercise `/api/commands` with a synthetic transcript while signed in
+2. **Set up meeting** → save Cursor key → load repos → pick repo → **Start meeting**
+3. Open a Meet tab **in the same Chrome profile** and turn captions on (**CC**)
+4. Click **Start listening** — speaker-attributed captions stream into the transcript pane
+5. Say a wake phrase and watch the agent row appear
 
-### Verify checklist
+<details>
+<summary><b>✅ Verification checklist</b></summary>
 
-- [ ] GitHub sign-in redirects back to the app and shows your username
-- [ ] Meeting setup accepts a Cursor API key and **Load from Cursor** lists repos
+<br/>
+
+- [ ] GitHub sign-in redirects back and shows your username
+- [ ] Meeting setup accepts a Cursor API key
+- [ ] **Load from Cursor** lists repositories
 - [ ] Starting a meeting opens the live page for the selected repo
-- [ ] **Meet captions:** extension loaded, Meet CC on, **Start listening** shows caption text
-- [ ] **Wispr:** **Start listening** connects to Wispr (skip if you are not testing mic audio)
+- [ ] Extension loaded, Meet CC on, **Start listening** shows caption text
+- [ ] A wake phrase creates a pending agent row, then an issue or PR link
 
-## Notes
+</details>
 
-- Cloud agents can only clone repos already authorized for the Cursor GitHub App. The repo picker uses `Cursor.repositories.list`, not GitHub’s `/user/repos`.
-- Cursor’s agent sandbox token cannot create issues; issue commands inject your GitHub OAuth token as `GITHUB_TOKEN` so the agent can run `gh issue create`.
-- PR commands plan from the associated GitHub issue (matched or just created), then execute that plan on a Cursor cloud agent with `autoCreatePR: true` (branch, atomic commits, PR body linking the issue).
-- Meeting state (transcript, launched agents) lives in the browser for this hackathon scaffold — no database.
-- Meet caption scraping is best-effort: Google’s DOM is not a public API and may change.
+---
+
+## API
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/commands` | Run the pipeline for a detected wake phrase |
+| `GET` | `/api/repos` | List Cursor-authorized repositories |
+| `GET` | `/api/agents/[id]` | Poll cloud agent status, summary, and PR link |
+| `*` | `/api/auth/[...nextauth]` | Auth.js GitHub OAuth |
+
+All routes require an authenticated session; the command, repo, and agent routes additionally require a saved Cursor API key.
+
+---
+
+## Project layout
+
+```
+src/
+├── app/
+│   ├── api/            # commands, repos, agents, auth route handlers
+│   └── meeting/        # setup page + live meeting page
+├── components/         # MeetingSetup, MeetingLive, TranscriptPane, AgentStatus
+├── hooks/              # useKeywordDetector, useMeetCaptionStream
+└── lib/
+    ├── keywords.ts     # wake-phrase normalization + fuzzy matching
+    ├── cursor.ts       # @cursor/sdk wrapper, model resolution, retries
+    ├── github.ts       # Octokit helpers (issues, comments, search)
+    ├── pipeline/       # stage runner + the six pipeline stages
+    └── triggers/       # transcript sources for offline scanning
+extension/              # Chrome MV3 extension that scrapes Meet captions
+sample-transcripts/     # fixtures for the dry-run scanner
+```
+
+---
 
 ## Scripts
 
-| Command         | Description                 |
-| --------------- | --------------------------- |
-| `npm run dev`   | Next.js dev server          |
-| `npm run build` | Production build            |
-| `npm run test`  | Unit tests (Vitest)         |
-| `npm run scan:samples` | Dry-run trigger scan on sample transcripts |
+| Command | Description |
+| --- | --- |
+| `npm run dev` | Start the Next.js dev server |
+| `npm run build` | Production build |
+| `npm run start` | Serve the production build |
+| `npm run lint` | ESLint |
+| `npm run test` | Run the Vitest suite once |
+| `npm run test:watch` | Vitest in watch mode |
+| `npm run scan:samples` | Dry-run the trigger scan over `sample-transcripts/` |
+
+### Testing
+
+```bash
+npm run test
+```
+
+**148 tests across 19 files** cover wake-phrase matching, caption parsing, every pipeline stage, GitHub helpers, Cursor retry behavior, and client persistence. `npm run scan:samples` exercises the detection path end-to-end against recorded transcripts without launching a single agent — the fastest way to iterate on keyword logic.
+
+---
+
+## Design notes
+
+- **Repo picking goes through Cursor, not GitHub.** The picker calls `Cursor.repositories.list` rather than GitHub's `/user/repos`, because a repo is only usable if the Cursor GitHub App can already clone it.
+- **Agents can't create issues with their own token.** Cursor's sandbox token lacks the permission, so issue commands inject your GitHub OAuth token as `GITHUB_TOKEN`, letting the agent run `gh issue create`.
+- **PRs are planned, then executed.** A PR command resolves the associated issue first (matched or freshly created), plans against it, then runs that plan on a cloud agent with `autoCreatePR: true` — producing a branch, atomic commits, and a PR body that links the issue.
+- **State is client-side.** Transcript and launched agents live in the browser. No database — this is a hackathon scaffold.
+- **Caption scraping is best-effort.** Meet's DOM is not a public API. Selectors prefer `aria-label` / `aria-live` and fall back to structural parsing, but Google can change it at any time.
+
+---
+
+<div align="center">
+<sub>Built at a hackathon. Powered by Cursor cloud agents.</sub>
+</div>
